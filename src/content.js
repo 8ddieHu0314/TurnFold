@@ -9,6 +9,10 @@
  *    We only toggle CSS classes on them and append our own small overlay
  *    elements. A MutationObserver + periodic tick re-applies state whenever
  *    React re-renders (streaming, edits, navigation).
+ *  - We make NO assumptions about how deeply messages are nested or whether
+ *    they are siblings. Each question anchors a turn; the elements to hide
+ *    are computed as the subtrees sitting between that question and the
+ *    next one in document order (see hideTargetsBetween).
  *  - Collapsed state is kept per conversation in chrome.storage.local so it
  *    survives reloads.
  */
@@ -22,7 +26,13 @@
   const USER_MSG_SELECTOR = '[data-testid="user-message"]';
   // Each rendered message sits in a wrapper carrying this attribute.
   const WRAPPER_SELECTOR = '[data-test-render-count]';
+  // Never hide an element that is, or contains, any of these: the composer,
+  // navigation, or another question. Belt-and-suspenders guard for the
+  // tree walk in hideTargetsBetween.
+  const UNSAFE_SELECTOR =
+    'textarea, [contenteditable="true"], form, nav, [data-testid="user-message"]';
 
+  const MAX_CLIMB = 12;           // levels to walk up from a question wrapper
   const SCAN_DEBOUNCE_MS = 300;
   const TICK_MS = 800;            // URL watcher; every 4th tick forces a scan
   const SAVE_DEBOUNCE_MS = 500;
@@ -51,7 +61,7 @@
   // ---------------------------------------------------------------------
   let convId = null;          // conversation uuid from the URL, or null
   let collapsed = {};         // turnKey -> true (only for the active conv)
-  let turns = [];             // [{ key, label, userWrapper, wrappers[] }]
+  let turns = [];             // [{ key, label, userWrapper, hideTargets[] }]
   let sidebarOpen = false;
   let lastHref = location.href;
   let lastOutlineSig = '';
@@ -107,57 +117,95 @@
   }
 
   // First non-empty line of the user's question, used as the collapsed label.
-  function firstLine(userWrapper) {
-    const el = userWrapper.querySelector(USER_MSG_SELECTOR) || userWrapper;
-    const text = (el.textContent || '').trim();
+  function firstLine(anchor) {
+    const el = anchor.querySelector(USER_MSG_SELECTOR) || anchor;
+    const block = el.querySelector('p, li, pre, h1, h2, h3, blockquote');
+    const text = ((block && block.textContent) || el.textContent || '').trim();
     const line = text.split('\n').map((s) => s.trim()).find((s) => s.length > 0);
     return (line || 'Untitled').slice(0, LABEL_MAX_CHARS);
   }
 
   // ---------------------------------------------------------------------
-  // Turn detection
+  // Turn detection — structure-agnostic
   // ---------------------------------------------------------------------
+  function lowestCommonAncestor(nodes) {
+    let anc = nodes[0];
+    for (let i = 1; i < nodes.length && anc; i++) {
+      while (anc && !anc.contains(nodes[i])) anc = anc.parentElement;
+    }
+    return anc || null;
+  }
+
+  function isSafeToHide(el) {
+    return !(el.matches(UNSAFE_SELECTOR) || el.querySelector(UNSAFE_SELECTOR));
+  }
+
+  /**
+   * Elements whose subtrees sit strictly between `anchor` (this turn's
+   * question wrapper) and `nextAnchor` (the next turn's question wrapper) in
+   * document order. Walk up from the anchor; at each level collect following
+   * siblings, stopping at the branch that contains the next question. For
+   * the last turn, `container` (the conversation's common ancestor) bounds
+   * the climb instead.
+   */
+  function hideTargetsBetween(anchor, nextAnchor, container) {
+    if (!nextAnchor && !container) return []; // can't bound the walk safely
+    const targets = [];
+    const nextChain = new Set();
+    for (let n = nextAnchor; n; n = n.parentElement) nextChain.add(n);
+
+    let node = anchor;
+    for (let depth = 0;
+         node && node !== container && node !== document.body && depth < MAX_CLIMB;
+         depth++) {
+      let reachedNext = false;
+      for (let s = node.nextElementSibling; s; s = s.nextElementSibling) {
+        if (nextChain.has(s)) { reachedNext = true; break; }
+        if (isSafeToHide(s)) targets.push(s);
+      }
+      if (reachedNext || !node.parentElement || nextChain.has(node.parentElement)) break;
+      node = node.parentElement;
+    }
+    return targets;
+  }
+
   function collectTurns() {
     const userEls = Array.from(document.querySelectorAll(USER_MSG_SELECTOR));
     if (userEls.length === 0) return [];
 
-    // Find the container whose direct children are the message wrappers.
+    // One anchor per question: its message wrapper (in document order).
+    const anchors = [];
+    const seen = new Set();
+    for (const el of userEls) {
+      const a = el.closest(WRAPPER_SELECTOR) || el.parentElement;
+      if (a && !seen.has(a)) { seen.add(a); anchors.push(a); }
+    }
+
+    // Container bounding the last turn's hide-walk: the lowest common
+    // ancestor of the question anchors, or — in single-question chats — of
+    // all message wrappers (questions + answers).
     let container = null;
-    const w0 = userEls[0].closest(WRAPPER_SELECTOR);
-    if (w0) {
-      container = w0.parentElement;
-    } else if (userEls.length >= 2) {
-      // Fallback: lowest common ancestor of the first two user messages.
-      let a = userEls[0];
-      while (a && !a.contains(userEls[1])) a = a.parentElement;
-      container = a;
+    if (anchors.length >= 2) {
+      container = lowestCommonAncestor(anchors);
     } else {
-      container = userEls[0].parentElement && userEls[0].parentElement.parentElement;
+      const wrappers = Array.from(document.querySelectorAll(WRAPPER_SELECTOR));
+      if (wrappers.length >= 2) container = lowestCommonAncestor(wrappers);
     }
-    if (!container) return [];
-
-    const wrapperOf = (el) => {
-      let n = el;
-      while (n && n.parentElement !== container) n = n.parentElement;
-      return n;
-    };
-    const userWrappers = new Set(userEls.map(wrapperOf).filter(Boolean));
-
-    const found = [];
-    let cur = null;
-    for (const child of container.children) {
-      if (child.nodeType !== 1) continue;
-      if (userWrappers.has(child)) {
-        cur = { userWrapper: child, wrappers: [], label: firstLine(child) };
-        found.push(cur);
-      } else if (cur) {
-        cur.wrappers.push(child);
-      }
+    if (container === document.body || container === document.documentElement) {
+      container = null;
     }
-    // Key = position + content hash: stable across reloads of the same
-    // conversation, and collapses harmlessly reset if a message is edited.
-    found.forEach((t, i) => { t.key = 't' + i + ':' + hash(t.label); });
-    return found;
+
+    return anchors.map((a, i) => {
+      const label = firstLine(a);
+      return {
+        userWrapper: a,
+        label,
+        // Key = position + content hash: stable across reloads of the same
+        // conversation; resets harmlessly if a message is edited.
+        key: 't' + i + ':' + hash(label),
+        hideTargets: hideTargetsBetween(a, anchors[i + 1] || null, container),
+      };
+    });
   }
 
   // ---------------------------------------------------------------------
@@ -180,11 +228,22 @@
   }
 
   function applyAll() {
+    const toHide = new Set();
     for (const t of turns) {
-      const isCollapsed = !!collapsed[t.key];
+      if (collapsed[t.key]) for (const el of t.hideTargets) toHide.add(el);
+    }
+    // Clear classes that no longer apply (nodes replaced, turns re-grouped).
+    for (const el of document.querySelectorAll('.tf-hidden')) {
+      if (!toHide.has(el)) el.classList.remove('tf-hidden');
+    }
+    const anchorSet = new Set(turns.map((t) => t.userWrapper));
+    for (const el of document.querySelectorAll('.tf-turn')) {
+      if (!anchorSet.has(el)) el.classList.remove('tf-turn', 'tf-collapsed');
+    }
+    for (const el of toHide) el.classList.add('tf-hidden');
+    for (const t of turns) {
       t.userWrapper.classList.add('tf-turn');
-      t.userWrapper.classList.toggle('tf-collapsed', isCollapsed);
-      for (const w of t.wrappers) w.classList.toggle('tf-hidden', isCollapsed);
+      t.userWrapper.classList.toggle('tf-collapsed', !!collapsed[t.key]);
       ensureToggleButton(t.userWrapper);
     }
     updateUi();
@@ -374,8 +433,16 @@
     await onNavigate();
     pruneOldConversations();
 
-    new MutationObserver(debouncedScan)
-      .observe(document.body, { childList: true, subtree: true });
+    // childList catches added/replaced messages; the class filter catches
+    // React re-renders that rewrite className and would silently strip our
+    // tf-* classes. Re-applying is idempotent (classList.add of an existing
+    // class fires no mutation), so this settles instead of looping.
+    new MutationObserver(debouncedScan).observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['class'],
+    });
 
     // Safety net: catch SPA navigations and any re-render the observer's
     // debounce swallowed during long streaming responses.
@@ -387,6 +454,20 @@
       }
       if (++tickCount % 4 === 0) scan();
     }, TICK_MS);
+  }
+
+  // Test hook: only populated when a harness pre-defines window.__TF_TEST__.
+  if (window.__TF_TEST__) {
+    Object.assign(window.__TF_TEST__, {
+      collectTurns,
+      hideTargetsBetween,
+      lowestCommonAncestor,
+      firstLine,
+      scan,
+      applyAll,
+      getTurns: () => turns,
+      setCollapsed: (c) => { collapsed = c; },
+    });
   }
 
   if (document.body) init();

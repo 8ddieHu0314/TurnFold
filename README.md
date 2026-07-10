@@ -36,7 +36,9 @@ Works in any Chromium browser (Chrome, Edge, Brave, Arc).
 
 ## How it works
 
-A content script groups the chat into turns: each `[data-testid="user-message"]` starts a turn that runs until the next one. Because claude.ai is a React app, the script **never moves or removes React-owned DOM nodes** — folding is done purely by toggling CSS classes (`display: none` on the answer, a one-line clamp on the question), and the chevron/sidebar are small elements appended outside React's control. A `MutationObserver` plus a slow periodic tick re-apply state whenever React re-renders (streaming answers, edits, switching conversations).
+A content script groups the chat into turns: each `[data-testid="user-message"]` anchors a turn that runs until the next one. The grouping makes no assumptions about the DOM shape — it computes the subtrees sitting *between* one question and the next in document order via an ancestor walk, so it works whether claude.ai renders messages as flat siblings, deeply nested branches, or paired groups. A guard refuses to hide anything containing the composer, navigation, or another question.
+
+Because claude.ai is a React app, the script **never moves or removes React-owned DOM nodes** — folding is done purely by toggling CSS classes (`display: none` on the answer, a one-line clamp on the question), and the chevron/sidebar are small elements appended outside React's control. A `MutationObserver` (watching both child-list and class changes) plus a slow periodic tick re-apply state whenever React re-renders (streaming answers, edits, switching conversations).
 
 Fold state is keyed by conversation ID (from the URL) plus each turn's position and a hash of its first line, so it survives reloads but resets harmlessly if a message is edited. Stored state is pruned beyond the 200 most recently used conversations.
 
