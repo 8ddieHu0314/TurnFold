@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TurnFold — Collapse Claude Chat Turns",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Notion-style toggles for claude.ai: fold each question+answer turn down to one line, with an outline sidebar and collapse-all.",
   "permissions": ["storage"],
   "icons": {

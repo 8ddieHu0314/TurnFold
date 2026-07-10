@@ -245,6 +245,12 @@
     for (const el of document.querySelectorAll('.tf-turn')) {
       if (!anchorSet.has(el)) el.classList.remove('tf-turn', 'tf-collapsed');
     }
+    // React recycles DOM nodes between messages: a wrapper that stops being
+    // a question anchor may keep the chevron we appended — an invisible but
+    // clickable button bound to a stale wrapper. Remove such ghosts.
+    for (const btn of document.querySelectorAll('.tf-toggle')) {
+      if (!anchorSet.has(btn.parentElement)) btn.remove();
+    }
     for (const el of toHide) el.classList.add('tf-hidden');
     for (const t of turns) {
       t.userWrapper.classList.add('tf-turn');

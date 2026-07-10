@@ -77,6 +77,7 @@ html.dark {
   color: var(--tf-fg-soft);
   cursor: pointer;
   opacity: 0;
+  pointer-events: none; /* an invisible button must never swallow clicks */
   transition: opacity 0.15s ease, transform 0.15s ease, color 0.15s ease;
 }
 
@@ -87,6 +88,7 @@ html.dark {
 
 .tf-turn:hover .tf-toggle {
   opacity: 0.8;
+  pointer-events: auto;
 }
 
 .tf-toggle:hover {
@@ -96,6 +98,7 @@ html.dark {
 
 .tf-turn.tf-collapsed .tf-toggle {
   opacity: 0.9;
+  pointer-events: auto;
 }
 
 .tf-turn.tf-collapsed .tf-toggle svg {
