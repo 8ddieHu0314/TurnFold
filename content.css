@@ -1,0 +1,287 @@
+/* TurnFold — styles. Everything is prefixed tf- to avoid colliding with claude.ai. */
+
+:root {
+  --tf-bg: #ffffff;
+  --tf-bg-soft: #f5f4ee;
+  --tf-fg: #3d3d3a;
+  --tf-fg-soft: #7d7d78;
+  --tf-border: rgba(0, 0, 0, 0.12);
+  --tf-accent: #c96442;
+  --tf-shadow: 0 4px 24px rgba(0, 0, 0, 0.14);
+}
+
+html.dark {
+  --tf-bg: #2b2a27;
+  --tf-bg-soft: #34332f;
+  --tf-fg: #e8e6df;
+  --tf-fg-soft: #a3a19a;
+  --tf-border: rgba(255, 255, 255, 0.14);
+  --tf-accent: #d97757;
+  --tf-shadow: 0 4px 24px rgba(0, 0, 0, 0.45);
+}
+
+@media (prefers-color-scheme: dark) {
+  html:not(.light):not(.dark) {
+    --tf-bg: #2b2a27;
+    --tf-bg-soft: #34332f;
+    --tf-fg: #e8e6df;
+    --tf-fg-soft: #a3a19a;
+    --tf-border: rgba(255, 255, 255, 0.14);
+    --tf-accent: #d97757;
+    --tf-shadow: 0 4px 24px rgba(0, 0, 0, 0.45);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Turn folding                                                        */
+/* ------------------------------------------------------------------ */
+
+/* Everything after the user message in a collapsed turn disappears. */
+.tf-hidden {
+  display: none !important;
+}
+
+.tf-turn {
+  position: relative;
+  scroll-margin-top: 90px;
+}
+
+/* Collapsed: clamp the question to its first line, Notion-toggle style. */
+.tf-turn.tf-collapsed [data-testid="user-message"] {
+  display: -webkit-box !important;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  overflow: hidden;
+  max-height: 2em;
+}
+
+.tf-turn.tf-collapsed [data-testid="user-message"]:hover {
+  cursor: pointer;
+}
+
+/* The chevron toggle on each turn. */
+.tf-toggle {
+  position: absolute;
+  top: 10px;
+  left: -6px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--tf-border);
+  border-radius: 50%;
+  background: var(--tf-bg);
+  color: var(--tf-fg-soft);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, transform 0.15s ease, color 0.15s ease;
+}
+
+.tf-toggle svg {
+  transform: rotate(90deg); /* expanded: chevron points down */
+  transition: transform 0.15s ease;
+}
+
+.tf-turn:hover .tf-toggle {
+  opacity: 0.8;
+}
+
+.tf-toggle:hover {
+  opacity: 1 !important;
+  color: var(--tf-accent);
+}
+
+.tf-turn.tf-collapsed .tf-toggle {
+  opacity: 0.9;
+}
+
+.tf-turn.tf-collapsed .tf-toggle svg {
+  transform: rotate(0deg); /* collapsed: chevron points right */
+}
+
+/* Brief highlight after jumping from the outline. */
+@keyframes tf-flash-anim {
+  0%   { box-shadow: 0 0 0 3px var(--tf-accent); }
+  100% { box-shadow: 0 0 0 3px transparent; }
+}
+
+.tf-turn.tf-flash {
+  animation: tf-flash-anim 1.2s ease-out 1;
+  border-radius: 12px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Floating button                                                     */
+/* ------------------------------------------------------------------ */
+
+.tf-fab {
+  position: fixed;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2147483000;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 44px;
+  padding: 0;
+  border: 1px solid var(--tf-border);
+  border-right: none;
+  border-radius: 10px 0 0 10px;
+  background: var(--tf-bg);
+  color: var(--tf-fg-soft);
+  box-shadow: var(--tf-shadow);
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.tf-fab.tf-visible {
+  display: flex;
+}
+
+.tf-fab:hover {
+  opacity: 1;
+  color: var(--tf-accent);
+}
+
+/* ------------------------------------------------------------------ */
+/* Outline sidebar                                                     */
+/* ------------------------------------------------------------------ */
+
+.tf-panel {
+  position: fixed;
+  right: 12px;
+  top: 72px;
+  bottom: 120px;
+  z-index: 2147483001;
+  display: none;
+  flex-direction: column;
+  width: 300px;
+  max-width: calc(100vw - 24px);
+  border: 1px solid var(--tf-border);
+  border-radius: 14px;
+  background: var(--tf-bg);
+  color: var(--tf-fg);
+  box-shadow: var(--tf-shadow);
+  font-size: 13px;
+  line-height: 1.35;
+  overflow: hidden;
+}
+
+.tf-panel.tf-open {
+  display: flex;
+}
+
+.tf-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--tf-border);
+  flex-shrink: 0;
+}
+
+.tf-panel-title {
+  font-weight: 600;
+}
+
+.tf-panel-count {
+  color: var(--tf-fg-soft);
+  font-weight: 400;
+}
+
+.tf-panel-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.tf-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--tf-fg-soft);
+  cursor: pointer;
+}
+
+.tf-icon-btn:hover {
+  background: var(--tf-bg-soft);
+  color: var(--tf-fg);
+}
+
+.tf-panel-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.tf-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.tf-item:hover {
+  background: var(--tf-bg-soft);
+}
+
+.tf-item-chevron {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--tf-fg-soft);
+  cursor: pointer;
+}
+
+.tf-item-chevron svg {
+  transform: rotate(90deg);
+  transition: transform 0.15s ease;
+}
+
+.tf-item.tf-item-collapsed .tf-item-chevron svg {
+  transform: rotate(0deg);
+}
+
+.tf-item-chevron:hover {
+  background: var(--tf-bg);
+  color: var(--tf-accent);
+}
+
+.tf-item-num {
+  flex-shrink: 0;
+  min-width: 18px;
+  color: var(--tf-fg-soft);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.tf-item-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tf-item.tf-item-collapsed .tf-item-label {
+  color: var(--tf-fg-soft);
+}

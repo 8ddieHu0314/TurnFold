@@ -1,0 +1,394 @@
+/**
+ * TurnFold — Notion-style toggles for claude.ai conversation turns.
+ *
+ * A "turn" = one user message plus everything that follows it (Claude's
+ * answer, tool output, etc.) up to the next user message.
+ *
+ * Design constraints:
+ *  - claude.ai is a React app, so we NEVER move or remove nodes React owns.
+ *    We only toggle CSS classes on them and append our own small overlay
+ *    elements. A MutationObserver + periodic tick re-applies state whenever
+ *    React re-renders (streaming, edits, navigation).
+ *  - Collapsed state is kept per conversation in chrome.storage.local so it
+ *    survives reloads.
+ */
+(() => {
+  'use strict';
+
+  // ---------------------------------------------------------------------
+  // Selectors for claude.ai's DOM. If claude.ai ships a redesign, these are
+  // the only things that should need updating.
+  // ---------------------------------------------------------------------
+  const USER_MSG_SELECTOR = '[data-testid="user-message"]';
+  // Each rendered message sits in a wrapper carrying this attribute.
+  const WRAPPER_SELECTOR = '[data-test-render-count]';
+
+  const SCAN_DEBOUNCE_MS = 300;
+  const TICK_MS = 800;            // URL watcher; every 4th tick forces a scan
+  const SAVE_DEBOUNCE_MS = 500;
+  const MAX_STORED_CONVERSATIONS = 200;
+  const LABEL_MAX_CHARS = 140;
+
+  const CHEVRON_SVG =
+    '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">' +
+    '<path d="M4.5 2.5 L11 8 L4.5 13.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const COLLAPSE_ALL_SVG =
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">' +
+    '<path d="M3 6.5 L8 2.5 L13 6.5 M3 13 L8 9 L13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const EXPAND_ALL_SVG =
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">' +
+    '<path d="M3 3 L8 7 L13 3 M3 9.5 L8 13.5 L13 9.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const CLOSE_SVG =
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">' +
+    '<path d="M4 4 L12 12 M12 4 L4 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+  const LIST_SVG =
+    '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">' +
+    '<path d="M5.5 4 H13.5 M5.5 8 H13.5 M5.5 12 H13.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>' +
+    '<path d="M2.2 3.2 L3.8 4 L2.2 4.8 Z M2.2 7.2 L3.8 8 L2.2 8.8 Z M2.2 11.2 L3.8 12 L2.2 12.8 Z" fill="currentColor"/></svg>';
+
+  // ---------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------
+  let convId = null;          // conversation uuid from the URL, or null
+  let collapsed = {};         // turnKey -> true (only for the active conv)
+  let turns = [];             // [{ key, label, userWrapper, wrappers[] }]
+  let sidebarOpen = false;
+  let lastHref = location.href;
+  let lastOutlineSig = '';
+  let tickCount = 0;
+  let ui = null;              // { fab, panel, list, count }
+
+  // ---------------------------------------------------------------------
+  // Small utilities
+  // ---------------------------------------------------------------------
+  function debounce(fn, ms) {
+    let t = null;
+    return (...args) => {
+      clearTimeout(t);
+      t = setTimeout(() => fn(...args), ms);
+    };
+  }
+
+  function hash(str) {
+    let h = 5381;
+    for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) >>> 0;
+    return h.toString(36);
+  }
+
+  function storageGet(keys) {
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.get(keys, (res) => resolve(res || {}));
+      } catch (_) {
+        resolve({});
+      }
+    });
+  }
+
+  function storageSet(obj) {
+    try {
+      chrome.storage.local.set(obj);
+    } catch (_) { /* extension reloaded / context gone — degrade gracefully */ }
+  }
+
+  function storageRemove(keys) {
+    try {
+      chrome.storage.local.remove(keys);
+    } catch (_) { /* ignore */ }
+  }
+
+  function getConvId() {
+    const m = location.pathname.match(/\/chat\/([\w-]+)/);
+    return m ? m[1] : null;
+  }
+
+  function convStorageKey(id) {
+    return 'tf-conv:' + id;
+  }
+
+  // First non-empty line of the user's question, used as the collapsed label.
+  function firstLine(userWrapper) {
+    const el = userWrapper.querySelector(USER_MSG_SELECTOR) || userWrapper;
+    const text = (el.textContent || '').trim();
+    const line = text.split('\n').map((s) => s.trim()).find((s) => s.length > 0);
+    return (line || 'Untitled').slice(0, LABEL_MAX_CHARS);
+  }
+
+  // ---------------------------------------------------------------------
+  // Turn detection
+  // ---------------------------------------------------------------------
+  function collectTurns() {
+    const userEls = Array.from(document.querySelectorAll(USER_MSG_SELECTOR));
+    if (userEls.length === 0) return [];
+
+    // Find the container whose direct children are the message wrappers.
+    let container = null;
+    const w0 = userEls[0].closest(WRAPPER_SELECTOR);
+    if (w0) {
+      container = w0.parentElement;
+    } else if (userEls.length >= 2) {
+      // Fallback: lowest common ancestor of the first two user messages.
+      let a = userEls[0];
+      while (a && !a.contains(userEls[1])) a = a.parentElement;
+      container = a;
+    } else {
+      container = userEls[0].parentElement && userEls[0].parentElement.parentElement;
+    }
+    if (!container) return [];
+
+    const wrapperOf = (el) => {
+      let n = el;
+      while (n && n.parentElement !== container) n = n.parentElement;
+      return n;
+    };
+    const userWrappers = new Set(userEls.map(wrapperOf).filter(Boolean));
+
+    const found = [];
+    let cur = null;
+    for (const child of container.children) {
+      if (child.nodeType !== 1) continue;
+      if (userWrappers.has(child)) {
+        cur = { userWrapper: child, wrappers: [], label: firstLine(child) };
+        found.push(cur);
+      } else if (cur) {
+        cur.wrappers.push(child);
+      }
+    }
+    // Key = position + content hash: stable across reloads of the same
+    // conversation, and collapses harmlessly reset if a message is edited.
+    found.forEach((t, i) => { t.key = 't' + i + ':' + hash(t.label); });
+    return found;
+  }
+
+  // ---------------------------------------------------------------------
+  // Applying collapse state to the DOM
+  // ---------------------------------------------------------------------
+  function ensureToggleButton(wrapper) {
+    if (wrapper.querySelector(':scope > .tf-toggle')) return;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tf-toggle';
+    btn.title = 'Fold / unfold this turn (TurnFold)';
+    btn.setAttribute('aria-label', 'Fold or unfold this conversation turn');
+    btn.innerHTML = CHEVRON_SVG;
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleTurnByWrapper(wrapper);
+    });
+    wrapper.appendChild(btn);
+  }
+
+  function applyAll() {
+    for (const t of turns) {
+      const isCollapsed = !!collapsed[t.key];
+      t.userWrapper.classList.add('tf-turn');
+      t.userWrapper.classList.toggle('tf-collapsed', isCollapsed);
+      for (const w of t.wrappers) w.classList.toggle('tf-hidden', isCollapsed);
+      ensureToggleButton(t.userWrapper);
+    }
+    updateUi();
+  }
+
+  function toggleTurnByWrapper(wrapper) {
+    const t = turns.find((x) => x.userWrapper === wrapper);
+    if (!t) return;
+    collapsed[t.key] = !collapsed[t.key];
+    if (!collapsed[t.key]) delete collapsed[t.key];
+    applyAll();
+    saveState();
+  }
+
+  function setAll(isCollapsed) {
+    collapsed = {};
+    if (isCollapsed) for (const t of turns) collapsed[t.key] = true;
+    applyAll();
+    saveState();
+  }
+
+  // ---------------------------------------------------------------------
+  // Persistence
+  // ---------------------------------------------------------------------
+  const saveState = debounce(() => {
+    if (!convId) return; // brand-new chat with no id yet: in-memory only
+    storageSet({ [convStorageKey(convId)]: { c: collapsed, ts: Date.now() } });
+  }, SAVE_DEBOUNCE_MS);
+
+  async function loadState(id) {
+    if (!id) { collapsed = {}; return; }
+    const res = await storageGet(convStorageKey(id));
+    const entry = res[convStorageKey(id)];
+    collapsed = (entry && entry.c && typeof entry.c === 'object') ? entry.c : {};
+  }
+
+  async function pruneOldConversations() {
+    const all = await storageGet(null);
+    const entries = Object.entries(all).filter(([k]) => k.startsWith('tf-conv:'));
+    if (entries.length <= MAX_STORED_CONVERSATIONS) return;
+    entries.sort((a, b) => (a[1].ts || 0) - (b[1].ts || 0));
+    const excess = entries.slice(0, entries.length - MAX_STORED_CONVERSATIONS);
+    storageRemove(excess.map(([k]) => k));
+  }
+
+  // ---------------------------------------------------------------------
+  // Sidebar + floating button (our own UI, mounted outside React's tree)
+  // ---------------------------------------------------------------------
+  function buildUi() {
+    if (ui) return;
+
+    const fab = document.createElement('button');
+    fab.type = 'button';
+    fab.className = 'tf-fab';
+    fab.title = 'TurnFold outline (Alt+Shift+O)';
+    fab.setAttribute('aria-label', 'Toggle TurnFold outline sidebar');
+    fab.innerHTML = LIST_SVG;
+    fab.addEventListener('click', () => setSidebarOpen(!sidebarOpen));
+
+    const panel = document.createElement('div');
+    panel.className = 'tf-panel';
+    panel.innerHTML =
+      '<div class="tf-panel-head">' +
+      '  <span class="tf-panel-title">Outline <span class="tf-panel-count"></span></span>' +
+      '  <span class="tf-panel-actions">' +
+      '    <button type="button" class="tf-icon-btn tf-collapse-all" title="Collapse all turns (Alt+Shift+C)">' + COLLAPSE_ALL_SVG + '</button>' +
+      '    <button type="button" class="tf-icon-btn tf-expand-all" title="Expand all turns (Alt+Shift+E)">' + EXPAND_ALL_SVG + '</button>' +
+      '    <button type="button" class="tf-icon-btn tf-close" title="Close">' + CLOSE_SVG + '</button>' +
+      '  </span>' +
+      '</div>' +
+      '<div class="tf-panel-list" role="list"></div>';
+
+    panel.querySelector('.tf-collapse-all').addEventListener('click', () => setAll(true));
+    panel.querySelector('.tf-expand-all').addEventListener('click', () => setAll(false));
+    panel.querySelector('.tf-close').addEventListener('click', () => setSidebarOpen(false));
+
+    const list = panel.querySelector('.tf-panel-list');
+    list.addEventListener('click', (e) => {
+      const chev = e.target.closest('.tf-item-chevron');
+      const item = e.target.closest('.tf-item');
+      if (!item) return;
+      const t = turns[Number(item.dataset.index)];
+      if (!t) return;
+      if (chev) {
+        toggleTurnByWrapper(t.userWrapper);
+        return;
+      }
+      t.userWrapper.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      t.userWrapper.classList.remove('tf-flash');
+      void t.userWrapper.offsetWidth; // restart the highlight animation
+      t.userWrapper.classList.add('tf-flash');
+    });
+
+    document.body.appendChild(fab);
+    document.body.appendChild(panel);
+    ui = { fab, panel, list, count: panel.querySelector('.tf-panel-count') };
+  }
+
+  function setSidebarOpen(open) {
+    sidebarOpen = open;
+    updateUi();
+    storageSet({ 'tf-ui': { open: sidebarOpen } });
+  }
+
+  function updateUi() {
+    if (!ui) return;
+    const hasTurns = turns.length > 0;
+    ui.fab.classList.toggle('tf-visible', hasTurns);
+    ui.panel.classList.toggle('tf-open', hasTurns && sidebarOpen);
+    if (!hasTurns || !sidebarOpen) { lastOutlineSig = ''; return; }
+
+    const sig = convId + '|' + turns.map((t) => t.key + (collapsed[t.key] ? '1' : '0')).join('|');
+    if (sig === lastOutlineSig) return;
+    lastOutlineSig = sig;
+
+    ui.count.textContent = String(turns.length);
+    ui.list.textContent = '';
+    turns.forEach((t, i) => {
+      const item = document.createElement('div');
+      item.className = 'tf-item' + (collapsed[t.key] ? ' tf-item-collapsed' : '');
+      item.dataset.index = String(i);
+      item.setAttribute('role', 'listitem');
+
+      const chev = document.createElement('button');
+      chev.type = 'button';
+      chev.className = 'tf-item-chevron';
+      chev.title = collapsed[t.key] ? 'Unfold this turn' : 'Fold this turn';
+      chev.innerHTML = CHEVRON_SVG;
+
+      const num = document.createElement('span');
+      num.className = 'tf-item-num';
+      num.textContent = String(i + 1);
+
+      const label = document.createElement('span');
+      label.className = 'tf-item-label';
+      label.textContent = t.label;
+      label.title = t.label;
+
+      item.append(chev, num, label);
+      ui.list.appendChild(item);
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Scanning / navigation
+  // ---------------------------------------------------------------------
+  function scan() {
+    turns = collectTurns();
+    applyAll();
+  }
+  const debouncedScan = debounce(scan, SCAN_DEBOUNCE_MS);
+
+  async function onNavigate() {
+    convId = getConvId();
+    lastOutlineSig = '';
+    await loadState(convId);
+    scan();
+  }
+
+  // Expand a collapsed turn by clicking its (clamped) question text.
+  document.addEventListener('click', (e) => {
+    if (!e.target || !e.target.closest) return;
+    if (e.target.closest('.tf-toggle')) return;
+    const wrapper = e.target.closest('.tf-turn.tf-collapsed');
+    if (!wrapper) return;
+    if (!e.target.closest(USER_MSG_SELECTOR)) return;
+    if (String(window.getSelection())) return; // don't hijack text selection
+    e.preventDefault();
+    e.stopPropagation();
+    toggleTurnByWrapper(wrapper);
+  }, true);
+
+  document.addEventListener('keydown', (e) => {
+    if (!e.altKey || !e.shiftKey || e.ctrlKey || e.metaKey) return;
+    if (e.code === 'KeyO') { e.preventDefault(); setSidebarOpen(!sidebarOpen); }
+    else if (e.code === 'KeyC') { e.preventDefault(); setAll(true); }
+    else if (e.code === 'KeyE') { e.preventDefault(); setAll(false); }
+  });
+
+  // ---------------------------------------------------------------------
+  // Boot
+  // ---------------------------------------------------------------------
+  async function init() {
+    buildUi();
+    const res = await storageGet('tf-ui');
+    sidebarOpen = !!(res['tf-ui'] && res['tf-ui'].open);
+    await onNavigate();
+    pruneOldConversations();
+
+    new MutationObserver(debouncedScan)
+      .observe(document.body, { childList: true, subtree: true });
+
+    // Safety net: catch SPA navigations and any re-render the observer's
+    // debounce swallowed during long streaming responses.
+    setInterval(() => {
+      if (location.href !== lastHref) {
+        lastHref = location.href;
+        onNavigate();
+        return;
+      }
+      if (++tickCount % 4 === 0) scan();
+    }, TICK_MS);
+  }
+
+  if (document.body) init();
+  else document.addEventListener('DOMContentLoaded', init, { once: true });
+})();
