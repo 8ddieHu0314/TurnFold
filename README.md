@@ -17,12 +17,20 @@ A Chrome extension that adds **Notion-style toggles to claude.ai conversations**
 | `Alt+Shift+C` | Collapse all turns |
 | `Alt+Shift+E` | Expand all turns |
 
-## Install (unpacked)
+## Install
 
-1. Open `chrome://extensions` in Chrome.
-2. Turn on **Developer mode** (top-right toggle).
-3. Click **Load unpacked** and select this folder.
-4. Open (or reload) any conversation on [claude.ai](https://claude.ai).
+### Option A — download the zip (easiest)
+
+1. Grab `TurnFold.zip` from the [latest release](https://github.com/8ddieHu0314/TurnFold/releases/latest) and unzip it.
+2. Open `chrome://extensions` in Chrome.
+3. Turn on **Developer mode** (top-right toggle).
+4. Click **Load unpacked** and select the unzipped `TurnFold` folder.
+5. Open (or reload) any conversation on [claude.ai](https://claude.ai).
+
+### Option B — from source
+
+1. Clone this repo.
+2. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and select the `src/` folder.
 
 Works in any Chromium browser (Chrome, Edge, Brave, Arc).
 
@@ -38,4 +46,4 @@ No data leaves your browser. The extension has no background script, no network 
 
 ## Troubleshooting
 
-If claude.ai ships a redesign and toggles stop appearing, the DOM selectors at the top of `content.js` (`USER_MSG_SELECTOR`, `WRAPPER_SELECTOR`) are the only things that should need updating.
+If claude.ai ships a redesign and toggles stop appearing, the DOM selectors at the top of `src/content.js` (`USER_MSG_SELECTOR`, `WRAPPER_SELECTOR`) are the only things that should need updating.
