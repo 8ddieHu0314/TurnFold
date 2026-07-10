@@ -48,4 +48,5 @@ No data leaves your browser. The extension has no background script, no network 
 
 ## Troubleshooting
 
-If claude.ai ships a redesign and toggles stop appearing, the DOM selectors at the top of `src/content.js` (`USER_MSG_SELECTOR`, `WRAPPER_SELECTOR`) are the only things that should need updating.
+- **After updating or reloading the extension, refresh any open claude.ai tabs.** Chrome cuts a reloaded extension off from tabs that are already open — the old script decays (toggles vanish, folds misbehave) until the tab is refreshed. To check what a tab is running: `document.documentElement.dataset.tfVersion` in DevTools, or look for `[TurnFold] vX.Y.Z active` in the console.
+- If claude.ai ships a redesign and toggles stop appearing, the DOM selectors at the top of `src/content.js` (`USER_MSG_SELECTOR`, `WRAPPER_SELECTOR`) are the only things that should need updating.

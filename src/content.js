@@ -195,14 +195,19 @@
       container = null;
     }
 
+    // Key = content hash + occurrence count, NOT position: claude.ai
+    // virtualizes long chats (offscreen messages unmount while scrolling),
+    // so mounted indices shift constantly. Content-based keys keep fold
+    // state attached to the right turn; edits reset it harmlessly.
+    const occurrences = {};
     return anchors.map((a, i) => {
       const label = firstLine(a);
+      const h = hash(label);
+      occurrences[h] = (occurrences[h] || 0) + 1;
       return {
         userWrapper: a,
         label,
-        // Key = position + content hash: stable across reloads of the same
-        // conversation; resets harmlessly if a message is edited.
-        key: 't' + i + ':' + hash(label),
+        key: h + ':' + occurrences[h],
         hideTargets: hideTargetsBetween(a, anchors[i + 1] || null, container),
       };
     });
@@ -250,7 +255,11 @@
   }
 
   function toggleTurnByWrapper(wrapper) {
-    const t = turns.find((x) => x.userWrapper === wrapper);
+    // Rescan synchronously so the toggle acts on the CURRENT structure, not
+    // a snapshot from up to 300ms ago — React may have remounted messages
+    // (streaming, virtualization) since the last scan.
+    turns = collectTurns();
+    const t = turns.find((x) => x.userWrapper === wrapper || x.userWrapper.contains(wrapper));
     if (!t) return;
     collapsed[t.key] = !collapsed[t.key];
     if (!collapsed[t.key]) delete collapsed[t.key];
@@ -427,6 +436,13 @@
   // Boot
   // ---------------------------------------------------------------------
   async function init() {
+    // Version marker: lets diagnostics confirm which build is live in this
+    // tab (a reloaded extension silently orphans already-open tabs).
+    let version = 'dev';
+    try { version = chrome.runtime.getManifest().version; } catch (_) { /* ignore */ }
+    document.documentElement.setAttribute('data-tf-version', version);
+    console.info('[TurnFold] v' + version + ' active');
+
     buildUi();
     const res = await storageGet('tf-ui');
     sidebarOpen = !!(res['tf-ui'] && res['tf-ui'].open);
