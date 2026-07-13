@@ -290,6 +290,16 @@
     return list;
   }
 
+  // True when one normalized text contains the other. Covers messages with
+  // pasted-content chips or attachments: the DOM shows typed text plus chip
+  // text while the API's text field holds only the typed part (or vice
+  // versa). The length guard avoids accidental hits on short messages.
+  function normsRelated(a, b) {
+    if (!a || !b) return false;
+    if (Math.min(a.length, b.length) < 20) return a === b;
+    return a.includes(b) || b.includes(a);
+  }
+
   // Upgrade mounted turns to server-UUID keys by matching them (in order)
   // against the API's message list. UUID keys survive any amount of
   // mounting/unmounting; unmatched turns keep their content-hash key.
@@ -300,16 +310,23 @@
     for (const t of list) {
       const el = t.userWrapper.querySelector(USER_MSG_SELECTOR) || t.userWrapper;
       const norm = normText(el.textContent);
-      let found = false;
+      // Exact match anywhere in the remaining window wins; only if there is
+      // none do we accept a containment match (paste chips, attachments).
+      let hit = -1;
       for (let k = j; k < fullTurns.length; k++) {
-        if (fullTurns[k].norm === norm) {
-          t.key = 'u:' + fullTurns[k].uuid;
-          j = k + 1;
-          found = true;
-          break;
+        if (fullTurns[k].norm === norm) { hit = k; break; }
+      }
+      if (hit < 0) {
+        for (let k = j; k < fullTurns.length; k++) {
+          if (normsRelated(fullTurns[k].norm, norm)) { hit = k; break; }
         }
       }
-      if (!found) unmatched = true;
+      if (hit >= 0) {
+        t.key = 'u:' + fullTurns[hit].uuid;
+        j = hit + 1;
+      } else {
+        unmatched = true;
+      }
     }
     // A mounted question the API doesn't know about = a message sent after
     // our last fetch (or an edit). Refresh, throttled.
@@ -523,20 +540,33 @@
   }
 
   // Outline rows: the API's full history when available (unloaded turns
-  // render dimmed), otherwise just what's mounted in the DOM.
+  // render dimmed), otherwise just what's mounted in the DOM. Mounted turns
+  // the API doesn't know (just-sent or unmatched messages) are woven in at
+  // their DOM position between matched neighbours — never dumped at the end.
   function outlineItems() {
     if (!fullTurns) {
       return turns.map((t) => ({ key: t.key, label: t.label, mounted: true }));
     }
-    const mountedKeys = new Set(turns.map((t) => t.key));
-    const items = fullTurns.map((f) => ({
-      key: 'u:' + f.uuid,
-      label: f.label,
-      mounted: mountedKeys.has('u:' + f.uuid),
-    }));
-    // Mounted questions the API hasn't returned yet (just-sent messages).
+    const items = [];
+    let f = 0; // pointer into fullTurns; matched turn indices are monotonic
     for (const t of turns) {
-      if (!t.key.startsWith('u:')) items.push({ key: t.key, label: t.label, mounted: true });
+      const idx = t.key.startsWith('u:')
+        ? fullTurns.findIndex((x) => 'u:' + x.uuid === t.key)
+        : -1;
+      if (idx >= 0) {
+        while (f <= idx) {
+          const g = fullTurns[f];
+          items.push({ key: 'u:' + g.uuid, label: g.label, mounted: f === idx });
+          f++;
+        }
+      } else {
+        items.push({ key: t.key, label: t.label, mounted: true });
+      }
+    }
+    while (f < fullTurns.length) {
+      const g = fullTurns[f];
+      items.push({ key: 'u:' + g.uuid, label: g.label, mounted: false });
+      f++;
     }
     return items;
   }
