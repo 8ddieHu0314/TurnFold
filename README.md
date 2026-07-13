@@ -5,8 +5,8 @@ A Chrome extension that adds **Notion-style toggles to claude.ai conversations**
 ## Features
 
 - **Fold any turn** — hover a question and click the round chevron on its left, Notion-toggle style. Collapsed turns shrink to the first line of your question; the answer is hidden. Click the question (or the chevron) to unfold.
-- **Outline sidebar** — a small tab on the right edge of the window opens an outline listing every question in the chat. Click an entry to jump to that turn (with a brief highlight), or click its chevron to fold/unfold it from the outline.
-- **Collapse all / Expand all** — buttons in the outline header.
+- **Outline sidebar** — a small tab on the right edge of the window opens an outline listing every question in the chat, **including history claude.ai hasn't lazy-loaded yet** (fetched from claude.ai's own conversation API; unloaded entries appear dimmed). Click an entry to jump to that turn — for unloaded ones TurnFold auto-scrolls until claude.ai loads it — or click its chevron to fold/unfold from the outline.
+- **Collapse all / Expand all** — buttons in the outline header. Collapse-all covers the whole conversation: turns that lazy-load later arrive already folded.
 - **Persists across reloads** — fold state is saved per conversation in `chrome.storage.local` and restored when you come back. Everything starts expanded by default; new messages always arrive expanded.
 
 ### Keyboard shortcuts
@@ -44,7 +44,7 @@ Fold state is keyed by conversation ID (from the URL) plus each turn's position 
 
 ## Privacy
 
-No data leaves your browser. The extension has no background script, no network access, and only the `storage` permission; it runs solely on `claude.ai`.
+No data leaves your browser. The extension has no background script and only the `storage` permission; it runs solely on `claude.ai`. Its only network activity is reading your conversation list from claude.ai's own same-origin API (the same data the page itself loads), using your existing session — nothing is sent anywhere else. If that API is unavailable, the outline simply falls back to the messages currently on screen.
 
 ## Troubleshooting
 

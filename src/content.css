@@ -288,3 +288,10 @@ html.dark {
 .tf-item.tf-item-collapsed .tf-item-label {
   color: var(--tf-fg-soft);
 }
+
+/* Turn exists in the conversation but claude.ai hasn't lazy-loaded it yet. */
+.tf-item.tf-item-ghost .tf-item-label,
+.tf-item.tf-item-ghost .tf-item-num {
+  opacity: 0.55;
+  font-style: italic;
+}

@@ -68,6 +68,16 @@
   let tickCount = 0;
   let ui = null;              // { fab, panel, list, count }
 
+  // Full conversation history from claude.ai's same-origin API. The DOM only
+  // holds messages near the viewport (older ones lazy-load on scroll up), so
+  // this is the source of truth for the outline and for turn identity.
+  let fullTurns = null;       // [{ uuid, label, norm }] or null if unavailable
+  let orgId = null;
+  let apiFailed = false;
+  let apiInFlight = false;
+  let lastApiFetch = 0;
+  let scrollSearchToken = 0;
+
   // ---------------------------------------------------------------------
   // Small utilities
   // ---------------------------------------------------------------------
@@ -123,6 +133,71 @@
     const text = ((block && block.textContent) || el.textContent || '').trim();
     const line = text.split('\n').map((s) => s.trim()).find((s) => s.length > 0);
     return (line || 'Untitled').slice(0, LABEL_MAX_CHARS);
+  }
+
+  // Whitespace-free normalization for matching DOM questions to API
+  // messages: textContent glues paragraphs with no separator while the API
+  // text uses \n, so all whitespace must be ignored for equality.
+  function normText(s) {
+    return (s || '').replace(/\s+/g, '').slice(0, 200).toLowerCase();
+  }
+
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  // ---------------------------------------------------------------------
+  // Full history via claude.ai's same-origin API
+  // ---------------------------------------------------------------------
+  async function apiJson(url) {
+    const r = await fetch(url, { headers: { accept: 'application/json' } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }
+
+  async function fetchFullTurns(id) {
+    if (!id || apiFailed || apiInFlight) return;
+    const now = Date.now();
+    if (now - lastApiFetch < 4000) return;
+    lastApiFetch = now;
+    apiInFlight = true;
+    try {
+      let conv = null;
+      if (orgId) {
+        try { conv = await apiJson('https://claude.ai/api/organizations/' + orgId + '/chat_conversations/' + id); }
+        catch (_) { orgId = null; }
+      }
+      if (!conv) {
+        const orgs = await apiJson('https://claude.ai/api/organizations');
+        for (const o of Array.isArray(orgs) ? orgs : []) {
+          try {
+            conv = await apiJson('https://claude.ai/api/organizations/' + o.uuid + '/chat_conversations/' + id);
+            orgId = o.uuid;
+            break;
+          } catch (_) { /* conversation lives in another org */ }
+        }
+      }
+      if (!conv || !Array.isArray(conv.chat_messages)) throw new Error('unexpected response shape');
+      fullTurns = conv.chat_messages
+        .filter((m) => m && m.sender === 'human')
+        .map((m) => {
+          const text = m.text ||
+            (Array.isArray(m.content) ? m.content.map((b) => (b && b.text) || '').join('\n') : '');
+          const line = text.split('\n').map((s) => s.trim()).find((s) => s.length > 0) || 'Untitled';
+          return { uuid: m.uuid, label: line.slice(0, LABEL_MAX_CHARS), norm: normText(text) };
+        });
+      if (getConvId() === id) {
+        console.info('[TurnFold] conversation has ' + fullTurns.length + ' turns (' +
+          document.querySelectorAll(USER_MSG_SELECTOR).length + ' currently loaded in the DOM)');
+        lastOutlineSig = '';
+        scan();
+      }
+    } catch (e) {
+      apiFailed = true; // DOM-only fallback for the rest of the session
+      console.info('[TurnFold] full-history API unavailable (' + (e && e.message) + '); outline shows loaded messages only');
+    } finally {
+      apiInFlight = false;
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -200,7 +275,7 @@
     // so mounted indices shift constantly. Content-based keys keep fold
     // state attached to the right turn; edits reset it harmlessly.
     const occurrences = {};
-    return anchors.map((a, i) => {
+    const list = anchors.map((a, i) => {
       const label = firstLine(a);
       const h = hash(label);
       occurrences[h] = (occurrences[h] || 0) + 1;
@@ -211,6 +286,34 @@
         hideTargets: hideTargetsBetween(a, anchors[i + 1] || null, container),
       };
     });
+    alignKeysToApi(list);
+    return list;
+  }
+
+  // Upgrade mounted turns to server-UUID keys by matching them (in order)
+  // against the API's message list. UUID keys survive any amount of
+  // mounting/unmounting; unmatched turns keep their content-hash key.
+  function alignKeysToApi(list) {
+    if (!fullTurns) return;
+    let j = 0;
+    let unmatched = false;
+    for (const t of list) {
+      const el = t.userWrapper.querySelector(USER_MSG_SELECTOR) || t.userWrapper;
+      const norm = normText(el.textContent);
+      let found = false;
+      for (let k = j; k < fullTurns.length; k++) {
+        if (fullTurns[k].norm === norm) {
+          t.key = 'u:' + fullTurns[k].uuid;
+          j = k + 1;
+          found = true;
+          break;
+        }
+      }
+      if (!found) unmatched = true;
+    }
+    // A mounted question the API doesn't know about = a message sent after
+    // our last fetch (or an edit). Refresh, throttled.
+    if (unmatched && convId) fetchFullTurns(convId);
   }
 
   // ---------------------------------------------------------------------
@@ -275,9 +378,74 @@
 
   function setAll(isCollapsed) {
     collapsed = {};
-    if (isCollapsed) for (const t of turns) collapsed[t.key] = true;
+    if (isCollapsed) {
+      // UUID keys cover the whole conversation, so turns that are not
+      // currently loaded fold the moment they lazy-load into the DOM.
+      if (fullTurns) for (const f of fullTurns) collapsed['u:' + f.uuid] = true;
+      for (const t of turns) collapsed[t.key] = true;
+    }
     applyAll();
     saveState();
+  }
+
+  function toggleKey(key) {
+    collapsed[key] = !collapsed[key];
+    if (!collapsed[key]) delete collapsed[key];
+    turns = collectTurns();
+    applyAll();
+    saveState();
+  }
+
+  function flashAndScroll(el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    el.classList.remove('tf-flash');
+    void el.offsetWidth; // restart the highlight animation
+    el.classList.add('tf-flash');
+  }
+
+  function jumpToKey(key) {
+    const t = turns.find((x) => x.key === key);
+    if (t) { flashAndScroll(t.userWrapper); return; }
+    scrollUntilLoaded(key);
+  }
+
+  function findScroller() {
+    const probe = turns[0] ? turns[0].userWrapper : document.querySelector(WRAPPER_SELECTOR);
+    let n = probe;
+    while (n && n !== document.body) {
+      if (n.scrollHeight > n.clientHeight + 100) {
+        const oy = getComputedStyle(n).overflowY;
+        if (oy === 'auto' || oy === 'scroll') return n;
+      }
+      n = n.parentElement;
+    }
+    return document.scrollingElement || document.documentElement;
+  }
+
+  // Jump to a turn that isn't in the DOM yet: step-scroll toward it so
+  // claude.ai lazy-loads history, rescanning after each step, until the
+  // target mounts or we hit the end of the scroller.
+  async function scrollUntilLoaded(key) {
+    if (!fullTurns) return;
+    const token = ++scrollSearchToken;
+    const targetIdx = fullTurns.findIndex((f) => 'u:' + f.uuid === key);
+    if (targetIdx < 0) return;
+    const scroller = findScroller();
+    if (!scroller) return;
+    const mountedIdxs = turns
+      .map((t) => fullTurns.findIndex((f) => 'u:' + f.uuid === t.key))
+      .filter((i) => i >= 0);
+    const goUp = mountedIdxs.length === 0 || targetIdx < Math.min(...mountedIdxs);
+    for (let step = 0; step < 80; step++) {
+      if (token !== scrollSearchToken || getConvId() !== convId) return;
+      const t = turns.find((x) => x.key === key);
+      if (t) { flashAndScroll(t.userWrapper); return; }
+      const before = scroller.scrollTop;
+      scroller.scrollTop = before + (goUp ? -1 : 1) * scroller.clientHeight * 0.85;
+      await sleep(300);
+      scan(); // pick up whatever just lazy-loaded
+      if (Math.abs(scroller.scrollTop - before) < 2) return; // hit the end
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -337,19 +505,10 @@
 
     const list = panel.querySelector('.tf-panel-list');
     list.addEventListener('click', (e) => {
-      const chev = e.target.closest('.tf-item-chevron');
       const item = e.target.closest('.tf-item');
-      if (!item) return;
-      const t = turns[Number(item.dataset.index)];
-      if (!t) return;
-      if (chev) {
-        toggleTurnByWrapper(t.userWrapper);
-        return;
-      }
-      t.userWrapper.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      t.userWrapper.classList.remove('tf-flash');
-      void t.userWrapper.offsetWidth; // restart the highlight animation
-      t.userWrapper.classList.add('tf-flash');
+      if (!item || !item.dataset.key) return;
+      if (e.target.closest('.tf-item-chevron')) toggleKey(item.dataset.key);
+      else jumpToKey(item.dataset.key);
     });
 
     document.body.appendChild(fab);
@@ -363,29 +522,55 @@
     storageSet({ 'tf-ui': { open: sidebarOpen } });
   }
 
+  // Outline rows: the API's full history when available (unloaded turns
+  // render dimmed), otherwise just what's mounted in the DOM.
+  function outlineItems() {
+    if (!fullTurns) {
+      return turns.map((t) => ({ key: t.key, label: t.label, mounted: true }));
+    }
+    const mountedKeys = new Set(turns.map((t) => t.key));
+    const items = fullTurns.map((f) => ({
+      key: 'u:' + f.uuid,
+      label: f.label,
+      mounted: mountedKeys.has('u:' + f.uuid),
+    }));
+    // Mounted questions the API hasn't returned yet (just-sent messages).
+    for (const t of turns) {
+      if (!t.key.startsWith('u:')) items.push({ key: t.key, label: t.label, mounted: true });
+    }
+    return items;
+  }
+
   function updateUi() {
     if (!ui) return;
-    const hasTurns = turns.length > 0;
-    ui.fab.classList.toggle('tf-visible', hasTurns);
-    ui.panel.classList.toggle('tf-open', hasTurns && sidebarOpen);
+    const hasTurns = turns.length > 0 || (fullTurns && fullTurns.length > 0);
+    ui.fab.classList.toggle('tf-visible', !!hasTurns);
+    ui.panel.classList.toggle('tf-open', !!hasTurns && sidebarOpen);
     if (!hasTurns || !sidebarOpen) { lastOutlineSig = ''; return; }
 
-    const sig = convId + '|' + turns.map((t) => t.key + (collapsed[t.key] ? '1' : '0')).join('|');
+    const items = outlineItems();
+    const sig = convId + '|' +
+      items.map((x) => x.key + (x.mounted ? 'm' : '') + (collapsed[x.key] ? '1' : '0')).join('|');
     if (sig === lastOutlineSig) return;
     lastOutlineSig = sig;
 
-    ui.count.textContent = String(turns.length);
+    ui.count.textContent = fullTurns
+      ? turns.length + '/' + items.length + ' loaded'
+      : String(items.length);
     ui.list.textContent = '';
-    turns.forEach((t, i) => {
+    items.forEach((x, i) => {
       const item = document.createElement('div');
-      item.className = 'tf-item' + (collapsed[t.key] ? ' tf-item-collapsed' : '');
-      item.dataset.index = String(i);
+      item.className = 'tf-item' +
+        (collapsed[x.key] ? ' tf-item-collapsed' : '') +
+        (x.mounted ? '' : ' tf-item-ghost');
+      item.dataset.key = x.key;
       item.setAttribute('role', 'listitem');
+      if (!x.mounted) item.title = 'Not loaded yet — click to scroll until claude.ai loads it';
 
       const chev = document.createElement('button');
       chev.type = 'button';
       chev.className = 'tf-item-chevron';
-      chev.title = collapsed[t.key] ? 'Unfold this turn' : 'Fold this turn';
+      chev.title = collapsed[x.key] ? 'Unfold this turn' : 'Fold this turn';
       chev.innerHTML = CHEVRON_SVG;
 
       const num = document.createElement('span');
@@ -394,8 +579,8 @@
 
       const label = document.createElement('span');
       label.className = 'tf-item-label';
-      label.textContent = t.label;
-      label.title = t.label;
+      label.textContent = x.label;
+      label.title = label.title || x.label;
 
       item.append(chev, num, label);
       ui.list.appendChild(item);
@@ -414,8 +599,12 @@
   async function onNavigate() {
     convId = getConvId();
     lastOutlineSig = '';
+    fullTurns = null;
+    scrollSearchToken++;      // cancel any in-flight jump search
+    lastApiFetch = 0;         // navigation bypasses the API throttle
     await loadState(convId);
     scan();
+    if (convId) fetchFullTurns(convId);
   }
 
   // Expand a collapsed turn by clicking its (clamped) question text.
@@ -459,7 +648,25 @@
     // React re-renders that rewrite className and would silently strip our
     // tf-* classes. Re-applying is idempotent (classList.add of an existing
     // class fires no mutation), so this settles instead of looping.
-    new MutationObserver(debouncedScan).observe(document.body, {
+    // Fast path: when a question node mounts (lazy-loaded history), scan
+    // immediately so a collapsed turn folds without a visible flash.
+    let lastFastScan = 0;
+    new MutationObserver((muts) => {
+      debouncedScan();
+      const now = Date.now();
+      if (now - lastFastScan < 150) return;
+      for (const m of muts) {
+        for (const n of m.addedNodes) {
+          if (n.nodeType === 1 &&
+              (n.matches(USER_MSG_SELECTOR) ||
+               (n.querySelector && n.querySelector(USER_MSG_SELECTOR)))) {
+            lastFastScan = now;
+            scan();
+            return;
+          }
+        }
+      }
+    }).observe(document.body, {
       childList: true,
       subtree: true,
       attributes: true,
@@ -485,10 +692,15 @@
       hideTargetsBetween,
       lowestCommonAncestor,
       firstLine,
+      normText,
+      outlineItems,
       scan,
       applyAll,
+      setAll,
       getTurns: () => turns,
       setCollapsed: (c) => { collapsed = c; },
+      getCollapsed: () => collapsed,
+      setFullTurns: (f) => { fullTurns = f; },
     });
   }
 
