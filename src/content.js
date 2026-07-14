@@ -290,14 +290,21 @@
     return list;
   }
 
-  // True when one normalized text contains the other. Covers messages with
-  // pasted-content chips or attachments: the DOM shows typed text plus chip
-  // text while the API's text field holds only the typed part (or vice
-  // versa). The length guard avoids accidental hits on short messages.
+  // Fuzzy relation for messages with pasted-content chips or attachments,
+  // where BOTH sides can carry differing tails: the DOM shows typed text +
+  // chip label while the API text holds typed text + the full pasted
+  // content. Containment covers one-sided extras; a long-enough common
+  // prefix covers two-sided ones (both share the typed part, then diverge).
+  // Thresholds keep short or merely similar-opening messages from matching.
   function normsRelated(a, b) {
     if (!a || !b) return false;
-    if (Math.min(a.length, b.length) < 20) return a === b;
-    return a.includes(b) || b.includes(a);
+    if (a === b) return true;
+    const n = Math.min(a.length, b.length);
+    if (n < 20) return false;
+    if (a.includes(b) || b.includes(a)) return true;
+    let i = 0;
+    while (i < n && a.charCodeAt(i) === b.charCodeAt(i)) i++;
+    return i >= Math.max(20, Math.floor(n / 2));
   }
 
   // Upgrade mounted turns to server-UUID keys by matching them (in order)
@@ -547,27 +554,36 @@
     if (!fullTurns) {
       return turns.map((t) => ({ key: t.key, label: t.label, mounted: true }));
     }
+    // Unmatched mounted turns anchor to their matched SUCCESSOR, not their
+    // predecessor: whether the preceding messages happen to be scrolled in
+    // must not move an item, or the outline reorders itself during scroll.
     const items = [];
     let f = 0; // pointer into fullTurns; matched turn indices are monotonic
+    let pending = []; // unmatched mounted turns awaiting their successor
     for (const t of turns) {
       const idx = t.key.startsWith('u:')
         ? fullTurns.findIndex((x) => 'u:' + x.uuid === t.key)
         : -1;
-      if (idx >= 0) {
-        while (f <= idx) {
-          const g = fullTurns[f];
-          items.push({ key: 'u:' + g.uuid, label: g.label, mounted: f === idx });
-          f++;
-        }
-      } else {
-        items.push({ key: t.key, label: t.label, mounted: true });
+      if (idx < 0) {
+        pending.push({ key: t.key, label: t.label, mounted: true });
+        continue;
       }
+      while (f < idx) {
+        const g = fullTurns[f];
+        items.push({ key: 'u:' + g.uuid, label: g.label, mounted: false });
+        f++;
+      }
+      items.push(...pending);
+      pending = [];
+      items.push({ key: 'u:' + fullTurns[idx].uuid, label: fullTurns[idx].label, mounted: true });
+      f = idx + 1;
     }
     while (f < fullTurns.length) {
       const g = fullTurns[f];
       items.push({ key: 'u:' + g.uuid, label: g.label, mounted: false });
       f++;
     }
+    items.push(...pending); // no successor: newest, belongs at the end
     return items;
   }
 
