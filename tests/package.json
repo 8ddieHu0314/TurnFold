@@ -1,0 +1,11 @@
+{
+  "name": "turnfold-tests",
+  "private": true,
+  "description": "jsdom regression tests for the TurnFold content script",
+  "scripts": {
+    "test": "node test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^24.0.0"
+  }
+}

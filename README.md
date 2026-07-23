@@ -46,6 +46,10 @@ Fold state is keyed by conversation ID (from the URL) plus each turn's position 
 
 No data leaves your browser. The extension has no background script and only the `storage` permission; it runs solely on `claude.ai`. Its only network activity is reading your conversation list from claude.ai's own same-origin API (the same data the page itself loads), using your existing session — nothing is sent anywhere else. If that API is unavailable, the outline simply falls back to the messages currently on screen.
 
+## Tests
+
+`cd tests && npm install && npm test` — a jsdom suite that exercises folding, outline building, and API alignment against every DOM shape claude.ai has shipped so far (flat, deeply nested, pair-grouped, virtualized, paste-chips, queued messages, edit-in-place).
+
 ## Troubleshooting
 
 - **After updating or reloading the extension, refresh any open claude.ai tabs.** Chrome cuts a reloaded extension off from tabs that are already open — the old script decays (toggles vanish, folds misbehave) until the tab is refreshed. To check what a tab is running: `document.documentElement.dataset.tfVersion` in DevTools, or look for `[TurnFold] vX.Y.Z active` in the console.

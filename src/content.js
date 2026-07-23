@@ -249,12 +249,20 @@
     if (userEls.length === 0) return [];
 
     // One anchor per question: its message wrapper (in document order).
+    // Queued/pending messages, edit-in-place boxes, and the composer can
+    // reuse the user-message marker but render inside a form or without a
+    // message wrapper — those are not sent turns and must never anchor
+    // (verified live: they get a stray chevron overlapping the composer).
     const anchors = [];
     const seen = new Set();
+    const docHasWrappers = !!document.querySelector(WRAPPER_SELECTOR);
     for (const el of userEls) {
-      const a = el.closest(WRAPPER_SELECTOR) || el.parentElement;
+      if (el.closest('form, [contenteditable="true"], fieldset')) continue;
+      const w = el.closest(WRAPPER_SELECTOR);
+      const a = w || (docHasWrappers ? null : el.parentElement);
       if (a && !seen.has(a)) { seen.add(a); anchors.push(a); }
     }
+    if (anchors.length === 0) return [];
 
     // Container bounding the last turn's hide-walk: the lowest common
     // ancestor of the question anchors, or — in single-question chats — of
